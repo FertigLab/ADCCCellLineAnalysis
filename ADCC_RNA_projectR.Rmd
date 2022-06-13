@@ -1,0 +1,188 @@
+---
+title: "ADCC_RNA_projectR"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+rnaMat = readRDS("ADCC_RNA_Matrix_cleaned.rds")
+
+library(projectR)
+library(CoGAPS)
+load("CoGAPSnP5.Rda")
+
+#subset to overlapping genes
+SamplesSub = rnaMat[which(rownames(rnaMat) %in% rownames(nP5$Amean)),]
+
+SamplesSub = as.matrix(log(SamplesSub + 1))
+
+pr = projectR::projectR(SamplesSub, nP5$Amean, rownames(SamplesSub), rownames(nP5$Amean), full = T)
+
+
+pr$projection[1:5, 1:5]
+
+ATACCoGAPS::cgapsPlot(t(pr$projection), as.factor(colnames(rnaMat)), matrix = T)
+
+orderedFactor = factor(colnames(rnaMat), levels = c("A431S", "A431R", "SKOV3S", "SKOV3R", "FaDuS", "FaDuR"))
+
+for(i in seq(nrow(pr$projection))){
+    boxplot(pr$projection[i,] ~ orderedFactor, col = RColorBrewer::brewer.pal(6,"Dark2"), xlab = "Sample", ylab = paste("Pattern", i, sep = ""),)
+  }
+}
+
+#save resistance pattern projection weights
+saveRDS(pr$projection[3,], "resProjections.rds")
+
+```
+
+Get the cell wise DNA damage signature and correlate to projected pattern
+```{r}
+library(dplyr)
+gPathways =  msigdbr::msigdbr(species = "Homo sapiens", category ="C5") %>% dplyr::select(gs_name, gene_symbol) %>% as.data.frame()
+
+respToDNADamage = gPathways[which(gPathways[,1] == "GOBP_POSITIVE_REGULATION_OF_RESPONSE_TO_DNA_DAMAGE_STIMULUS"),2]
+
+#normalize and scale data
+library(Seurat)
+seu = CreateSeuratObject(rnaMat)
+seu = NormalizeData(seu)
+seu = ScaleData(seu, do.center = FALSE)
+nsData = GetAssayData(seu, "data")
+
+
+#add up the values for the dna damage response genes
+geneInds = which(rownames(rnaMat) %in% respToDNADamage)
+dnaDamageScores = vector("numeric", dim(nsData)[2])
+for(i in 1:dim(nsData)[2]){
+  dnaDamageScores[i] = sum(nsData[geneInds, i])
+}
+
+cor(dnaDamageScores, pr$projection[3,])
+```
+
+Correlation with cell-surface protein expression
+```{r}
+proteinExpr = readRDS("proteinExpressionMatrix.rds")
+
+cellLineFactor = factor(c(rep("A431R", 9997), rep("A431S", 9999), rep("FaDuR", 9999), rep("FaDuS", 10000), rep("SKOV3R", 9999), rep("SKOV3S", 10000)), levels = c("FaDuR","FaDuS", "A431R", "A431S", "SKOV3R", "SKOV3S"))
+
+#subset to cells with matching barcodes and RNA filtering
+rnaMatWithBarcodes = readRDS("ADCC_RNA_Matrix_cleaned_withBarcodes.rds")
+
+CITEbarcodes = mapply(function(x, y){
+  paste(x,y, sep="_")}, cellLineFactor, colnames(proteinExpr))
+
+#find shared barcodes 
+length(which(CITEbarcodes %in% colnames(rnaMatWithBarcodes)))
+
+prSub = pr$projection[,which(colnames(rnaMatWithBarcodes) %in% CITEbarcodes)]
+proteinSub = proteinExpr[,which(CITEbarcodes %in% colnames(rnaMatWithBarcodes))]
+
+#match barcodes
+subRNABarcodes = colnames(rnaMatWithBarcodes)[which(colnames(rnaMatWithBarcodes) %in% CITEbarcodes)]
+subCITEBarcodes = CITEbarcodes[which(CITEbarcodes %in% colnames(rnaMatWithBarcodes))]
+
+proteinSub = proteinSub[,match(subRNABarcodes, subCITEBarcodes)]
+
+#find correlation for each protein
+proteinCorrs = apply(proteinSub, 1, function(x){
+  cor(x, prSub[3,])
+})
+
+barplot(sort(proteinCorrs), xlab = "Gene", ylab = "Pearson Correlation", col = "steelblue", ylim = c(0,0.6))
+
+proteinkCorrs = apply(proteinSub, 1, function(x){
+  pcaPP::cor.fk(x, prSub[3,])
+})
+
+barplot(sort(proteinkCorrs), xlab = "Gene", ylab = "Kendall Correlation", col = "steelblue", ylim = c(0,0.6))
+
+#split to sensitive and resistant groups
+prRes = prSub[,grep("R", colnames(prSub))]
+prSens = prSub[,-grep("R", colnames(prSub))]
+
+subCITEBarcodes2 = subCITEBarcodes[match(subRNABarcodes, subCITEBarcodes)]
+
+proteinRes = proteinSub[,grep("R", subCITEBarcodes2)]
+proteinSens = proteinSub[,-grep("R", subCITEBarcodes2)]
+
+proteinCorrsRes = apply(proteinRes, 1, function(x){
+  cor(x, prRes[3,])
+})
+
+barplot(sort(proteinCorrsRes), xlab = "Gene", ylab = "Pearson Correlation", col = "steelblue", ylim = c(0,0.6))
+
+proteinkCorrsRes = apply(proteinRes, 1, function(x){
+  pcaPP::cor.fk(x, prRes[3,])
+})
+
+barplot(sort(proteinkCorrsRes), xlab = "Gene", ylab = "Kendall Correlation", col = "steelblue", ylim = c(0,0.6))
+
+proteinCorrsSens = apply(proteinSens, 1, function(x){
+  cor(x, prSens[3,])
+})
+
+barplot(sort(proteinCorrsSens), xlab = "Gene", ylab = "Pearson Correlation", col = "steelblue", ylim = c(-0.2,0.5))
+
+proteinkCorrsSens = apply(proteinSens, 1, function(x){
+  pcaPP::cor.fk(x, prSens[3,])
+})
+
+barplot(sort(proteinkCorrsSens), xlab = "Gene", ylab = "Kendall Correlation", col = "steelblue", ylim = c(-0.2,0.5))
+
+#for each resistant cell line
+prA431R = prSub[,grep("A431R", colnames(prSub))]
+proteinA431R = proteinSub[,grep("A431R", colnames(prSub))]
+proteinCorrsA431R = apply(proteinA431R, 1, function(x){
+  pcaPP::cor.fk(x, prA431R[3,])
+})
+
+barplot(sort(proteinCorrsA431R), xlab = "Gene", ylab = "Kendall Correlation", col = "steelblue", ylim = c(0,0.4))
+
+prFaDuR = prSub[,grep("FaDuR", colnames(prSub))]
+proteinFaDuR = proteinSub[,grep("FaDuR", colnames(prSub))]
+proteinCorrsFaDuR = apply(proteinFaDuR, 1, function(x){
+  pcaPP::cor.fk(x, prFaDuR[3,])
+})
+
+barplot(sort(proteinCorrsFaDuR), xlab = "Gene", ylab = "Kendall Correlation", col = "steelblue", ylim = c(0,0.4))
+
+
+prSKOV3R = prSub[,grep("SKOV3R", colnames(prSub))]
+proteinSKOV3R = proteinSub[,grep("SKOV3R", colnames(prSub))]
+proteinCorrsSKOV3R = apply(proteinSKOV3R, 1, function(x){
+  pcaPP::cor.fk(x, prSKOV3R[3,])
+})
+
+barplot(sort(proteinCorrsSKOV3R), xlab = "Gene", ylab = "Kendall Correlation", col = "steelblue", ylim = c(0,0.4))
+
+#sensitive
+prA431S = prSub[,grep("A431S", colnames(prSub))]
+proteinA431S = proteinSub[,grep("A431S", colnames(prSub))]
+proteinCorrsA431S = apply(proteinA431S, 1, function(x){
+  pcaPP::cor.fk(x, prA431S[3,])
+})
+
+prFaDuS = prSub[,grep("FaDuS", colnames(prSub))]
+proteinFaDuS = proteinSub[,grep("FaDuS", colnames(prSub))]
+proteinCorrsFaDuS = apply(proteinFaDuS, 1, function(x){
+  pcaPP::cor.fk(x, prFaDuS[3,])
+})
+
+
+prSKOV3S = prSub[,grep("SKOV3S", colnames(prSub))]
+proteinSKOV3S = proteinSub[,grep("SKOV3S", colnames(prSub))]
+proteinCorrsSKOV3S = apply(proteinSKOV3S, 1, function(x){
+  pcaPP::cor.fk(x, prSKOV3S[3,])
+})
+
+corrMat = rbind(proteinCorrsA431R, proteinCorrsA431S, proteinCorrsFaDuR, proteinCorrsFaDuS, proteinCorrsSKOV3R, proteinCorrsSKOV3S)
+corrMat[is.na(corrMat)] = 0
+rownames(corrMat) = c("A431R", "A431S", "FaDuR", "FaDuS", "SKOV3R", "SKOV3S")
+
+my_palette = colorRampPalette(c("blue", " white", "darkgreen"))(n = 299)
+gplots::heatmap.2(corrMat, density.info="none", trace="none", dendrogram='both', Rowv=T, Colv=T, margins =c(6,12), col = my_palette)
+```
+
+
